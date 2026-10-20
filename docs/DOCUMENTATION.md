@@ -105,11 +105,11 @@ When samples for (for example) a single primer span multiple different gels, or 
 **Input.** 
 
 Requires a sample sheet (`examples/samples_template.csv`) with the following column headers: 
-`tier`: exact gel name used in steps 1 and 2
-`lane`: must correspond to the red lane number on `check_<gel>.png`. 
-`individual`: unique ID of each sample. 
-`population`: population or collection group name     
-`notes`: used to filter out lanes/noise. If anything is typed in the `notes` column (like _ladder_, _failed_PCR_, or _blurry_, for example), the script skips the lane. Only the rows in which `individual` is filled in and `notes` is blank are processed.
+- `tier`: exact gel name used in steps 1 and 2
+- `lane`: must correspond to the red lane number on `check_<gel>.png`. 
+- `individual`: unique ID of each sample. 
+- `population`: population or collection group name     
+- `notes`: used to filter out lanes/noise. If anything is typed in the `notes` column (like _ladder_, _failed_PCR_, or _blurry_, for example), the script skips the lane. Only the rows in which `individual` is filled in and `notes` is blank are processed.
 
 The script expects to find `results_<gel>/` folders and `calibration_<gel>.json` files sitting in the working directory alongside the sample spreadsheet (or use `--dir`).
 
