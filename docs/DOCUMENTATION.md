@@ -61,7 +61,7 @@ Classified clean and sized bands into genetic markers (loci). Groups bands of si
    - *merged bands*: Warns if `tol` is too high, causing two distinct bands from the same individual to fuse into one locus.
    - *physical ceiling*: Computes a physical limit based on the gel resolution; if the locus count exceeds the limit, warns the user about over-interpreting noise.
    - *contiguous-pixel cuts:* Flags instances where a locus boundary was forced right through a continuous cluster of pixels, which is not supported by data. 
-   - *linkage convergence*: Cross-checks complete linkage vs. single linkage. If both are identical, the locus boundaries are hopefully mathematically robust.
+   - *linkage convergence*: Cross-checks complete linkage vs. single linkage (maximum vs. minimum distance). If both are identical, the locus boundaries are hopefully mathematically robust.
    - *split band detection*: Flags neighboring loci separated by <2 px that share no overlapping sample, which usually means an uncorrected gel smiling, and can be joined with `--merge A+B[,C+D]`;
    - *locus stability profile*: Tests every locus by fluctuating the optimal `tol` by +-25%.
    
