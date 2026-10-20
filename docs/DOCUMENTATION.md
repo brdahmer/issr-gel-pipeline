@@ -10,13 +10,13 @@ Reads the `.gap` file from GelAnalyzer after manual scoring/annotation. Typicall
    reference curves of constant Rf, so a band's Rf is interpolated between the curves above and below it.
    When the gel is tilted by more than 4 px end to end, the rows are tracked a second time with the tilt
    removed, so that bands from different rows are not chained together.
-      `--curves drawn` uses the curves drawn by hand in GelAnalyzer
-      `--curves none` uses Rf = position / lane length.
+     - `--curves drawn` uses the curves drawn by hand in GelAnalyzer
+     - `--curves none` uses Rf = position / lane length.
    
 2. **Size calibration:** Estimates bp using the physical ladder lane pairing known bp dimension with their calculated Rf.
    By default (`--mw-model interp`), the script connects these points using local piecewise-linear interpolation using log10(bp)
    between neighboring ladder bands. Any bands migrating beyond the ladder range are marked `extrapolated = 1`.
-      `--mw-model exp` fits a single global curve `bp = a·exp(−b·Rf) + c` instead if the gel fits an exponential curve.
+     - `--mw-model exp` fits a single global curve `bp = a·exp(−b·Rf) + c` instead if the gel fits an exponential curve.
    
 3. **Densitometry:** Analyzes the embedded gel picture to calculate peak height and background-subtracted volume for every lane. If a lane volume falls below 20% of the median lane intensity, they're reported as weak (*possible PCR failure*) but are not automatically removed.
 
