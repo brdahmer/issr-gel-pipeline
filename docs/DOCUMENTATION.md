@@ -1,149 +1,168 @@
-# Technical documentation
+## Step 1 · `extract_gel.py`
 
-Three scripts, run in order. Each step reads the previous step's output files, so the steps can be
-re-run independently. For example, step 2 can be re-run with another tolerance without redoing step 1.
-
----
-
-## Step 1 · `extract_gel.py` — from a GelAnalyzer project to a band table
-
-**What it does.** It reads the binary `.gap` file saved by GelAnalyzer: the embedded gel image, the
-lanes, the band boundaries and peaks, and the ladder sizes. It then computes, for every band, a
-distortion-corrected relative mobility (Rf), a size in base pairs and an intensity.
+Reads the `.gap` file from GelAnalyzer after manual scoring/annotation. Typically includes/needs an embedded gel image, lane and band selections, well (0) and bottom (1) Rf curves, ladder info and attributed MW, then calculates relative mobility (Rf curves), size in bp and intensity (densitometry).
 
 **How.**
 
-1. **Distortion correction (Rf curves).** Gels are rarely straight: they tilt and "smile". With
-   `--curves auto` (default) the script follows each *row* of bands (the same band in neighbouring lanes)
-   from lane to lane and fits a line, or a parabola when the curvature is real. These fitted rows serve as
+1. **Distortion correction (Rf curves):** Corrects natural tilt and "smile" events in electrophoresis gels. With
+   `--curves auto` (default), the script follows each *row* of bands (or similar height band in neighbouring lanes)
+   from lane to lane and fits either a line (1st degree or 2nd degree when the curvature is real). Fitted rows serve as
    reference curves of constant Rf, so a band's Rf is interpolated between the curves above and below it.
    When the gel is tilted by more than 4 px end to end, the rows are tracked a second time with the tilt
-   removed, so that bands from different rows are not chained together. `--curves drawn` uses the curves
-   drawn by hand in GelAnalyzer, and `--curves none` uses Rf = position / lane length.
-2. **Size calibration.** Ladder bands give pairs (Rf, bp). Size is interpolated piecewise-linearly in
-   log10(bp) between neighbouring ladder bands, so the fit passes exactly through every ladder band.
-   Bands outside the ladder range are marked `extrapolated = 1`. `--mw-model exp` fits a single global
-   curve `bp = a·exp(−b·Rf) + c` instead.
-3. **Densitometry.** For each band it reports peak height and volume above background, computed from
-   the embedded image. Lanes whose total volume is under 1/5 of the median are reported as weak (possible
-   PCR failure), but they are never removed automatically.
+   removed, so that bands from different rows are not chained together.
+      `--curves drawn` uses the curves drawn by hand in GelAnalyzer
+      `--curves none` uses Rf = position / lane length.
+   
+2. **Size calibration:** Estimates bp using the physical ladder lane pairing known bp dimension with their calculated Rf.
+   By default (`--mw-model interp`), the script connects these points using local piecewise-linear interpolation using log10(bp)
+   between neighboring ladder bands. Any bands migrating beyond the ladder range are marked `extrapolated = 1`.
+      `--mw-model exp` fits a single global curve `bp = a·exp(−b·Rf) + c` instead if the gel fits an exponential curve.
+   
+3. **Densitometry:** Analyzes the embedded gel picture to calculate peak height and background-subtracted volume for every lane. If a lane volume falls below 20% of the median lane intensity, they're reported as weak (*possible PCR failure*) but are not automatically removed.
 
-**Outputs** (next to the `.gap`, or in `--out`):
+**Outputs** (files are saved directly alongisde the `.gap` file or in a folder specified with `--out`):
 
 | File | Content |
 |---|---|
-| `bands_<gel>.csv` | one row per band: `lane, sample, band, ladder, peak_px, rf, mw_bp, extrapolated, raw_volume, rel_volume_pct, …` |
-| `check_<gel>.png` | gel crop with sample bands (yellow), ladder bands (green), Rf curves (cyan) and lane numbers (red) |
-| `calibration_<gel>.json` | ladder residuals per size, Rf curves used, gel tilt, model used |
+| `bands_<gel>.csv` | primary output in which every row reports a single band's metric: `lane, sample, band, ladder, peak_px, rf, mw_bp, extrapolated, raw_volume, rel_volume_pct, etc.` |
+| `check_<gel>.png` | gel crop with sample bands (yellow), ladder bands (green), Rf curves (blue) and lane numbers (red) |
+| `calibration_<gel>.json` | ladder residuals per size, Rf curves used, gel tilt angles, model (regression constants) used |
 
 `peak_px` is the band position in the *corrected* frame, rounded to whole pixels. Step 2 uses it to
 reason in pixels.
 
-**Options:** `--curves auto|drawn|none`, `--out DIR`, `--ladder-lane N`, `--mw-model interp|exp`,
-`--auto-tol-px`, `--auto-min-frac`, `--no-tilt-correction`, `--validate GELANALYZER_EXPORT.csv`
-(compares Rf and bp against GelAnalyzer's own *Bands Information* table).
+**Command-Line Arguments**
+```
+Core execution syntax:
+python extract_gel.py "gel-data.gap" --curves auto --mw-model interp
 
+Custom flags:
+--curves [auto|drawn|none]    # Pick geometric correction behavior
+--mw-model [interp|exp]       # Pick size interpolation vs. exponential curve fitting
+--ladder-lane N               # Specify a custom lane as ladder
+--out DIR                     # Set custom output destination
+--no-tilt-correction          # Force-disable automated tilt adjustment
+--validate EXPORT.csv         # Compares Rf and bp against GelAnalyzer's own Bands Information table
+--auto-tol-px / --auto-min-frac # Finetune row tracking thresholds
+```
 ---
 
-## Step 2 · `bin_gel.R` — from bands to loci for one gel
+## Step 2 · `bin_gel.R`
 
-**What it does.** It groups bands of similar size into loci ("binning") and writes the 0/1 matrix
-(sample × locus). The key decision is the **tolerance**: how different two sizes may be and still count
-as the same locus.
+Classified clean and sized bands into genetic markers (loci). Groups bands of similar size across all samples into loci ("binning") and writes the binary presence/absence (1/0) matrix for downstream population genetics analysis.
 
 **How.**
 
-1. **Clustering.** Band sizes are clustered on log10(bp) with complete linkage, and the tree is cut so
-   that no locus spans more than *tol* %. Loci are named `<gel>_<size>bp`.
-2. **Resolution in pixels.** Band positions are integer pixels, so one pixel corresponds to a fixed
-   percentage of size on that gel. The script reports this value. A tolerance below one pixel cannot
-   group anything, so only tolerances of 1 px or more are considered.
-3. **Tolerance sweep and plateau.** Tolerances from 0.5 to 15 % are tried. The **plateau** is the
-   longest run of consecutive tolerances where (a) the number of loci stays the same and (b) no sample
-   has two bands in the same locus. The middle of the plateau is used, unless `--tol` is given.
-4. **Quality checks.** These are reported in `SUMMARY.txt`:
-   - *merged bands*: one sample with two bands in one locus, which means the tolerance is too large;
-   - *physical ceiling*: the occupied lane length divided by the smallest separation between two bands
-     of the same lane. The gel cannot resolve more loci than this;
-   - *contiguous-pixel cuts*: a locus boundary that falls inside a continuous run of observed
-     positions. Such a split is not supported by the data;
-   - *linkage agreement*: if complete and single linkage give the same partition, the grouping is unique;
-   - *possible split bands*: neighbouring loci ≤ 2 px apart that share no sample, which usually means
-     one band class split by gel smiling. They can be joined with `--merge 471+515`;
-   - *locus stability*: the fraction of tolerances within ±25 % that keep exactly the same bands in a locus.
-5. **Statistics.** For each locus it gives band frequency, expected heterozygosity He (allele frequency
-   q = √(1 − band frequency), as in GenAlEx), Shannon's I, and PIC = 2f(1 − f). It also computes a
-   Jaccard distance matrix and a UPGMA dendrogram with its cophenetic correlation. If `ape` is installed,
-   the dendrogram gets bootstrap support (1000 resamples of loci).
+1. **Clustering:** Runs one-dimensional complete linkage hierarchical clustering on the log10(bp) size of bands and cuts the tree so that no locus spans wider than a set % tolerance (`tol`). Tolerance values <1 px are ignored.
 
-**Outputs** (`results_<gel>/`):
+2. **Tolerance scan and plateau:** Scans across `tol` values from 0.5% to 15%, and defines the stable plateau as the longest run of consecutive `tol` values where (a) the number of loci remains stable and (b) no single individual sample has two of its own bands compressed into the same locus bin. The middle of the plateau is automatically employed unless `--tol` is used.
+
+3. **Quality checks:** Writes a report in `SUMMARY.txt`;
+   - *merged bands*: Warns if `tol` is too high, causing two distinct bands from the same individual to fuse into one locus.
+   - *physical ceiling*: Computes a physical limit based on the gel resolution; if the locus count exceeds the limit, warns the user about over-interpreting noise.
+   - *contiguous-pixel cuts:* Flags instances where a locus boundary was forced right through a continuous cluster of pixels, which is not supported by data. 
+   - *linkage convergence*: Cross-checks complete linkage vs. single linkage. If both are identical, the locus boundaries are hopefully mathematically robust.
+   - *split band detection*: Flags neighboring loci separated by <2 px that share no overlapping sample, which usually means an uncorrected gel smiling, and can be joined with `--merge A+B[,C+D]`;
+   - *locus stability profile*: Tests every locus by fluctuating the optimal `tol` by +-25%.
+   
+4. **Baseline population metrics.**
+By threating markers as a dominant genetic system, it calculates band frequencies, Expected Heterozygosity (He), Shannon's Information Index (I), and Polymorphism Information Content (PIC). Then computes a global Jaccard distance matrix and builds an UPGMA dendrogram. If the R package `ape` is available, it automatically appends confidence values (1,000 locus bootstrap resamples).
+
+**Outputs** (outputs are written inside a dedicated folder `results_<gel>/`):
 
 | File | Content |
 |---|---|
-| `SUMMARY.txt` | plain-language checklist — read first |
-| `binary_matrix.csv` / `.txt` | the 0/1 matrix (main result) |
-| `loci_bins.csv` | per locus: mean/min/max size, span, gap to neighbours, conflicts |
-| `locus_statistics.csv` | per locus: frequency, He, I, PIC, stability |
-| `primer_summary.csv` | one-line summary (used by step 3) |
-| `tolerance_sweep.csv` | the full sweep table |
-| `bands_annotated.csv` | input bands with their assigned locus |
-| `jaccard_distance.csv`, `dendrogram_*.pdf`, `upgma_tree_*.nwk` | sample clustering |
-| `diagnostics_*.pdf`, `matrix_*.pdf` | sweep plots, band map, matrix heat map |
-| `analysis_log.txt` | parameters, session info |
+| `SUMMARY.txt` | checklist summarizing biological and physical quality of the run |
+| `binary_matrix.csv` / `.txt` | binary presence/absence matrix |
+| `loci_bins.csv` | locus structural data, mean/min/max size, span (%width), separation gap to nearest neighbours, sample conflicts |
+| `locus_statistics.csv` | locus genetic data, band frequency, He, I, PIC, stability |
+| `primer_summary.csv` | single-row summary table containing global quality for Step 3 if necessary |
+| `tolerance_sweep.csv` | full tolerance sweep |
+| `bands_annotated.csv` | original input dataset appended with the final locus bin assignments |
+| `jaccard_distance.csv`, `dendrogram_*.pdf`, `upgma_tree_*.nwk` | sample clustering, distance matrices, UPGMA tree plots, and Newick tree files |
+| `diagnostics_*.pdf`, `matrix_*.pdf` | multi-panel visual plots containing the tolerance sweep, spatial band map, binary matrix heat map |
+| `analysis_log.txt` | execution log, parameters, session info |
 
-**Options:** `--screen` (print the sweep table only), `--tol X`, `--exclude 9,10`, `--merge A+B[,C+D]`,
-`--keep-outside-ladder`, `--out DIR`.
+**Command-Line Arguments**
+```
+Core execution syntax
+Rscript bin_gel.R "bands_gel_i5.csv"
 
+# Custom tweaks
+--screen               # Run a quick trial; prints the sweep table only then exits
+--tol 6.5              # Bypass auto-optimization and enforce a fixed percentage tolerance
+--exclude 9,10         # Completely drop specific low-quality lanes from the matrix
+--merge 471+515        # Force-fuse artifactual split bins into a single locus
+--keep-outside-ladder  # Prevent the script from discarding extrapolated bands
+--out DIR              # Redirect all output files to a custom directory 
+```
 ---
 
-## Step 3 · `combine_gels.R` — several gels of one primer into one matrix
+## Step 3 · `combine_gels.R`
 
-**What it does.** When the samples of one primer were run on several gels (or on the upper and lower
-tiers of one gel), it matches the loci of the different gels by size. It then builds one combined
-matrix, tests whether the gel itself left a signature in the data, and computes population statistics.
+When samples for (for example) a single primer span multiple different gels, or are split between the upper and lower tiers of the same gel, sizes can drift. The script attempts to match up separated loci by size to build a single, master binary matrix, then executes the binning and statistical checks.
 
-**Input.** A sample sheet (`examples/samples_template.csv`) with columns `tier, lane, individual,
-population, notes`. `tier` is the gel name used in steps 1–2. `lane` is the **red** lane number on
-`check_<tier>.png`. A row is used only when `individual` is filled in and `notes` is empty, so write
-`ladder`, `failed PCR`, etc. in `notes` to leave a lane out. The script looks for `results_<tier>/` and
-`calibration_<tier>.json` next to the sheet, or in `--dir`.
+**Input.** 
+
+Requires a sample sheet (`examples/samples_template.csv`) with the following column headers: 
+`tier`: exact gel name used in steps 1 and 2
+`lane`: must correspond to the red lane number on `check_<gel>.png`. 
+`individual`: unique ID of each sample. 
+`population`: population or collection group name     
+`notes`: used to filter out lanes/noise. If anything is typed in the `notes` column (like _ladder_, _failed_PCR_, or _blurry_, for example), the script skips the lane. Only the rows in which `individual` is filled in and `notes` is blank are processed.
+
+The script expects to find `results_<gel>/` folders and `calibration_<gel>.json` files sitting in the working directory alongside the sample spreadsheet (or use `--dir`).
 
 **How.**
 
-1. **Locus matching.** Loci from different tiers are clustered on log(bp) with complete linkage, under
-   one constraint: two loci of the same tier are never merged, because step 2 already decided they differ.
-2. **Anchor bands and tolerance.** Loci present in ≥ 50 % of the samples of two or more tiers and within
-   5 % of each other are treated as the same band. Their largest size difference estimates the
-   calibration error between gels, and the matching tolerance is set to 1.5 × that error (minimum 1 %).
-   Without anchors, the middle of the longest stable plateau is used instead. When no anchors are found,
-   the script also checks whether one constant size shift would align the frequent bands of two gels.
-   That correction can be applied deliberately with `--shift tier=−9.4`.
-3. **Replicates.** An individual listed on two tiers enters the matrix once. The percentage of loci that
-   agree between its two profiles is reported.
-4. **Gel-effect test.** When a population is spread over two or more tiers, PhiPT (AMOVA) is computed
-   between tiers within that population, along with Fisher's exact test per locus. A significant result
-   means either a gel artefact or real substructure. The summary also warns when tiers and populations
-   are fully confounded.
-5. **Population statistics.** Per population it reports % polymorphic loci, He, Shannon's I and
-   bands per individual. It also computes PhiPT between populations (999 permutations), all repeated at
-   the neighbouring tolerances as a sensitivity check. It draws a UPGMA/Jaccard dendrogram (with
-   bootstrap support when `ape` is installed) and a PCoA, coloured by population and shaped by tier.
+1. **Locus matching:** Runs the complete linkage hierarchical clustering algorithm on the log10(bp) sizes and clusters loci from different gels. As Step 2 should have already determined what bands are distinct, the script does not merge two loci of the same gel.
+   
+2. **Calibration Error (Anchor Bands) and tolerance:** To determine how much band sizes drift between different gel runs, the script searches for _anchor bands_, _i.e._ loci present in >50% of the samples in two or more gels and within 5% of each other.
+     - The script finds the single largest size difference among anchors to estimate cross-gel calibration error, then automatically sets cross-gel matching tolerance to 1.5 × that maximum error (baseline minimum of 1%).
+     - If gels do NOT share common high-frequency bands, the script scans for a stable plateau across a range of tolerances (as before) and picks the middle. It will also calculate whether a fixed mathematical shift would line up frequent bands. If a systemic drift is noticeable, the user can force an adjustment using `--shift tier=-9.4`, for example.
 
-**Outputs** (`results_<primer>_combined/`): `SUMMARY.txt`, `combined_matrix.csv` / `.txt` (individual,
-population, loci), `combined_loci.csv` (which tier loci were merged, frequency per population and tier),
-`population_diversity.csv`, `gel_effect_test.csv`, `tolerance_sensitivity.csv`, `dendrogram_*.pdf/png`,
-`upgma_tree_*.nwk`, `pcoa_*.pdf/png`, `combination_log.txt`.
+3. **Replicate handling:** If one individual is ran on both gels as a quality check, it is compressed into a single entry in the final matrix, then calculates the %agreement between the two gel runs.
 
-**Options:** `--tol X`, `--dir DIR`, `--out DIR`, `--name PRIMER`, `--permutations N`,
-`--shift tier=percent[,tier=percent]`.
+4. **Gel-effect test:** If a population is spread over two or more gels, the script extracts those specific groups and runs an AMOVA to calculate PhiPT between the gels alongside a locus-by-locus with Fisher's test.
+     - If this returns a highly significant p-value, warns the user that it likely reflects physical gel artifact.
+     - Also warns the user if populations and gels are completely confounded, _e.g.,_ Population 1 was ran on Gel A and Population 2 was ran on Gel B, etc., and separating biological from mechanical differences is relatively impossible.
+
+5. **Population metrics:** As before from the combined matrix, then computes overall PhiPT across populations using 999 random permutations and tests nearby `tol` values to ensure conclusions don't fall apart if the clustering threshold shifts. Finally, plots an UPGMA/Jaccard Dendrogram as before and produces a PCoA scatter plot.
+
+**Outputs** (written to `results_<primer>_combined/`):
+| File | Content |
+|---|---|
+| `SUMMARY.txt` | |
+| `combined_matrix.csv` / `.txt` | unified presence/absence matrix organized by individual and population |
+| `combined_loci.csv` | mapping showing which individual gel bins were merged, including their specific locus frequencies per population and gel |
+| `population_diversity.csv` | summary table of standard genetic diversity indicators |
+| `gel_effect_test.csv` | do the individual physical gel runs skew data? |
+| `tolerance_sensitivity.csv` | total locus counts and population PhiPT scores across alternative thresholds |
+| `dendrogram_*.pdf/png` & `upgma_tree_*.nwk` | visual tree diagrams and raw Newick tree files mapping individual sample relationships |
+| `pcoa_*.pdf/png` | scatter plot designed to visually isolate population grouping from gel-run cluster patterns |
+| `combination_log.txt` | log of the run |
+
+
+**Command-Line Arguments**
+
+**Command-Line Arguments**
+```
+Basic cross-gel merge execution
+Rscript combine_gels.R "my_sample_sheet.csv"
+
+# Advanced parameters
+--tol X                      # Force a specific cross-gel size tolerance and bypass auto-anchoring
+--dir DIR                    # Location of Step 2 folders and JSON files
+--out DIR                    # Redirect all outputs to a specific directory
+--name PRIMER                # Define a specific name tag for your outputs
+--permutations N             # Adjust the total number of random shuffles for AMOVA significance
+--shift tier=percent[,tier=percent] # Intentionally shift specific gel sizes by a percentage to correct drift
+```
 
 ---
 
 ## Notes and limitations
 
-- Band *calls* come from GelAnalyzer and the user. The pipeline measures and bins them, but it does
-  not detect bands itself.
-- Without replicate samples across gels, the genotyping error rate cannot be estimated. Cross-gel
-  locus matching then depends only on each gel's ladder calibration.
-- Statistics assume dominant markers and Hardy–Weinberg equilibrium for allele frequencies (the usual
-  convention for ISSR, as in GenAlEx).
+- NOT an automated peak detector, as it relies entirely on the initial visual bands and manual annotations done in GelAnalyzer. If a true biological band was missed or a visual artifact was misidentified during that initial phase, the pipeline will bin what it is given.
+- Cross-gel locus alignment is highly dependent on the precision of each gel's unique ladder calibration curve. _Without running explicit replicate samples across different gels, the pipeline CANNOT reliably calculate a statistical genotyping error rate_. Please add a few duplicate individuals across separate runs as (by standards) highly recommended to enable absolute error parameters calculation.
+- All downstream diversity metrics, heterozygosity indices, and population statistics are computed under the usual convention for ISSR for dominant molecular markers like in GenAlEx.
