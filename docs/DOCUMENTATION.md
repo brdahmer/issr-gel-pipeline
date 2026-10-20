@@ -7,18 +7,18 @@ Reads the `.gap` file from GelAnalyzer after manual scoring/annotation. Typicall
 1. **Distortion correction (Rf curves):** Corrects natural tilt and "smile" events in electrophoresis gels. With
    `--curves auto` (default), the script follows each *row* of bands (or similar height band in neighbouring lanes)
    from lane to lane and fits either a line (1st degree or 2nd degree when the curvature is real). Fitted rows serve as
-   reference curves of constant Rf, so a band's Rf is interpolated between the curves above and below it.
+   reference curves of constant Rf.
    When the gel is tilted by more than 4 px end to end, the rows are tracked a second time with the tilt
    removed, so that bands from different rows are not chained together.
      - `--curves drawn` uses the curves drawn by hand in GelAnalyzer
      - `--curves none` uses Rf = position / lane length.
    
-2. **Size calibration:** Estimates bp using the physical ladder lane pairing known bp dimension with their calculated Rf.
+2. **Size calibration:** Estimates bp using the physical ladder lane by pairing the known bp dimension (from ladder) with their calculated Rf.
    By default (`--mw-model interp`), the script connects these points using local piecewise-linear interpolation using log10(bp)
    between neighboring ladder bands. Any bands migrating beyond the ladder range are marked `extrapolated = 1`.
      - `--mw-model exp` fits a single global curve `bp = a·exp(−b·Rf) + c` instead if the gel fits an exponential curve.
    
-3. **Densitometry:** Analyzes the embedded gel picture to calculate peak height and background-subtracted volume for every lane. If a lane volume falls below 20% of the median lane intensity, they're reported as weak (*possible PCR failure*) but are not automatically removed.
+3. **Densitometry:** Analyzes the embedded gel picture to calculate peak height and background-subtracted volume for every lane. If a lane volume falls below 20% of the median lane intensity, the lane is reported as weak (*possible PCR failure*) but are not automatically removed.
 
 **Outputs** (files are saved directly alongisde the `.gap` file or in a folder specified with `--out`):
 
