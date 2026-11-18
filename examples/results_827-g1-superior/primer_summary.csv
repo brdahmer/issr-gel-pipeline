@@ -1,0 +1,2 @@
+"primer","n_samples","n_loci","n_polymorphic","pct_polymorphic","mean_he","mean_shannon_i","mean_pic","mean_bands_per_sample","tolerance_pct","tolerance_px","resolution_1px_pct","n_ambiguous_boundaries","n_contiguous_cuts","unique_grouping","detection_floor_px","max_loci","mean_stability","cophenetic_r"
+"827-g1-superior",26,20,20,100,0.2237,0.3585,0.2609,6,7,6.33,1.106,12,3,FALSE,7,23,0.864,0.8426

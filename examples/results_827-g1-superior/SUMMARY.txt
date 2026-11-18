@@ -1,0 +1,16 @@
+SUMMARY - 827-g1-superior
+  Samples: 26 | Tolerance: 7.00 % (automatic: middle of plateau 6.50-7.50 %)
+  Loci: 20 (20 polymorphic, 0 monomorphic, 3 in a single sample)
+
+[OK]      tolerance inside a stable plateau (6.50-7.50 %)
+[OK]      no sample with 2 bands in the same locus (0)
+[OK]      bins no wider than the detection floor (7.00 % vs 7.74 % = 7 px)
+[OK]      number of loci within what the gel can resolve (20 of at most ~23)
+[CHECK]   no locus boundary cuts through a continuous run of bands (3)
+[CHECK]   possible band split into 2 loci (no sample in common, <= 2 px apart): 827-g1-superior_349bp + 827-g1-superior_330bp; 827-g1-superior_514bp + 827-g1-superior_483bp; 827-g1-superior_1169bp + 827-g1-superior_1088bp; 827-g1-superior_1374bp + 827-g1-superior_1325bp; 827-g1-superior_1450bp + 827-g1-superior_1374bp
+[OK]      no lane with very weak signal
+  note: no monomorphic locus. If a band is visible in every sample, check that it was not split.
+
+  Excluded lanes (--exclude): 29
+  Lanes with no band marked (not in the matrix): 18
+  Main output: binary_matrix.csv (1 = band present, 0 = absent)
