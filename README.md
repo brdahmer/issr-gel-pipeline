@@ -32,7 +32,7 @@ Requires that the user has specified lanes, bands, and ladder sizes (MW), saved 
 # STEP 1 - once per gel
 python3 extract_gel.py "examples/827-g1-superior.gap"
 #   -> bands_827-g1-superior.csv, check_827-g1-superior.png, calibration_827-g1-superior.json
-#   check_827-g1-superior.jpg: picture of the gel showing bands (yellow), ladder (green), Rf curves (blue), and lane # (red)
+#   check_827-g1-superior.png: picture of the gel showing bands (yellow), ladder (green), Rf curves (blue), and lane # (red)
 
 # STEP 2 - once per gel
 Rscript bin_gel.R "examples/bands_827-g1-superior.csv"
