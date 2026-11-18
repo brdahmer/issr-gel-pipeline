@@ -128,8 +128,8 @@ bin_bands <- function(df, tol_pct, samples, primer, type = "width",
 }
 
 #' Fallback tolerance when no plateau exists (minimise contiguous-pixel cuts)
-fallback_tolerance <- function(sweep) {
-  v <- sweep[sweep$n_conflicts == 0, ]
+fallback_tolerance <- function(sweep, min_tol = 0) {
+  v <- sweep[sweep$n_conflicts == 0 & sweep$tol_pct >= min_tol, ]
   if (!nrow(v)) return(NULL)
   ok <- v[v$linkages_agree & v$n_contiguous_cuts == 0, ]
   if (!nrow(ok)) ok <- v[v$n_contiguous_cuts == 0, ]
@@ -142,8 +142,9 @@ fallback_tolerance <- function(sweep) {
 #' run, so two conflict-free runs separated by a conflict are never merged.
 #' Optional physical limits also break the run: tolerances wider than
 #' `max_tol` (bins wider than the image can resolve) and locus counts above
-#' `max_loci` (more loci than the image can resolve).
-find_plateau <- function(sweep, min_tol, max_tol = Inf, max_loci = Inf) {
+#' `max_loci` (more loci than the image can resolve). Runs shorter than
+#' `min_len` sweep steps are not considered stable (NULL is returned).
+find_plateau <- function(sweep, min_tol, max_tol = Inf, max_loci = Inf, min_len = 1) {
   v <- sweep[sweep$tol_pct >= min_tol, ]
   valid <- v$n_conflicts == 0 & v$tol_pct <= max_tol & v$n_loci <= max_loci
   if (!nrow(v) || !any(valid)) return(NULL)
@@ -152,6 +153,7 @@ find_plateau <- function(sweep, min_tol, max_tol = Inf, max_loci = Inf) {
   end <- cumsum(r$lengths); start <- end - r$lengths + 1
   len <- ifelse(is.na(r$values), 0L, r$lengths)
   i <- which.max(len)
+  if (len[i] < min_len) return(NULL)
   list(n_loci = r$values[i], tol_min = v$tol_pct[start[i]], tol_max = v$tol_pct[end[i]],
        tol_mid = mean(c(v$tol_pct[start[i]], v$tol_pct[end[i]])))
 }
@@ -267,24 +269,42 @@ run_binning <- function(band_file, out_dir, primer,
   # The peak detector cannot separate two very close bands in the SAME lane;
   # the smallest observed within-lane separation is the detection floor. The
   # image can resolve at most (occupied range) / (floor) distinct positions.
-  sep_within <- unlist(lapply(split(bands$peak_px, bands$sample),
-                              function(v) if (length(v) < 2) NULL else diff(sort(v))))
-  floor_px  <- if (length(sep_within)) min(sep_within) else NA
+  # Keep track of which pair sets the floor: a single stray double mark in
+  # GelAnalyzer can set it for the whole gel, so the user must be able to find it.
+  pairs <- do.call(rbind, lapply(split(bands, bands$sample), function(s) {
+    if (nrow(s) < 2) return(NULL)
+    s <- s[order(s$peak_px), ]
+    data.frame(lane = s$lane[-1], px_a = s$peak_px[-nrow(s)], px_b = s$peak_px[-1],
+               bp_a = s$mw_bp[-nrow(s)], bp_b = s$mw_bp[-1], sep = diff(s$peak_px))
+  }))
+  floor_px  <- if (!is.null(pairs) && nrow(pairs)) min(pairs$sep) else NA
   range_px  <- diff(range(bands$peak_px))
   max_loci  <- if (is.na(floor_px)) NA else floor(range_px / floor_px)
   msg("")
   msg("--- Physical ceiling of the image ---")
-  msg("Bands span %d px; smallest separation within a lane: %s px", range_px, floor_px)
+  if (is.na(floor_px)) {
+    msg("Bands span %d px; smallest separation within a lane: not measurable (no lane has 2 or more bands)",
+        range_px)
+  } else {
+    fp <- pairs[pairs$sep == floor_px, ]
+    msg("Bands span %d px; smallest separation within a lane: %d px", range_px, floor_px)
+    msg("  set by lane %s: bands at %s px (%s bp) and %s px (%s bp)%s",
+        fp$lane[1], fp$px_a[1], round(fp$bp_a[1]), fp$px_b[1], round(fp$bp_b[1]),
+        if (nrow(fp) > 1) sprintf(" (+%d other pair(s) as close)", nrow(fp) - 1) else "")
+    msg("  if these are one band marked twice, fix it in GelAnalyzer: it limits the whole gel")
+  }
   msg("Maximum number of distinguishable positions: ~%s loci", max_loci)
 
   ## --- 3. Choose the tolerance ------------------------------------------------
   # A bin wider than the detection floor can join bands that this image can
   # tell apart, so the plateau must also stay within the floor and the ceiling.
   max_tol_floor <- if (is.na(floor_px)) Inf else floor_px * res_px_pct
+  # at least 3 sweep steps (0.5 %), so a single tolerance squeezed in under a
+  # low floor never counts as "stable"
   plateau <- find_plateau(sweep, res_px_pct, max_tol_floor,
-                          if (is.na(max_loci)) Inf else max_loci)
+                          if (is.na(max_loci)) Inf else max_loci, min_len = 3)
   plateau_physical <- !is.null(plateau)
-  if (!plateau_physical) plateau <- find_plateau(sweep, res_px_pct)
+  if (!plateau_physical) plateau <- find_plateau(sweep, res_px_pct, min_len = 3)
   ok_sweep <- sweep[sweep$n_conflicts == 0 & sweep$tol_pct >= res_px_pct, ]
   max_tol_no_conflict <- if (nrow(ok_sweep)) max(ok_sweep$tol_pct) else NA
   msg("")
@@ -298,6 +318,8 @@ run_binning <- function(band_file, out_dir, primer,
         plateau$tol_min, plateau$tol_max, plateau$n_loci, plateau$tol_mid,
         if (plateau_physical) "" else
           "\n  WARNING: no plateau fits within the detection floor and locus ceiling; using the longest plateau anyway")
+  if (is.null(plateau))
+    msg("No stable plateau (at least 3 consecutive tolerances with the same loci and no merging)")
 
   tol_source <- "set by user (--tol)"
   if (identical(tol_pct, "auto")) {
@@ -306,8 +328,15 @@ run_binning <- function(band_file, out_dir, primer,
       tol_source <- sprintf("automatic: middle of plateau %.2f-%.2f %%",
                             plateau$tol_min, plateau$tol_max)
     } else {
-      tol_pct <- fallback_tolerance(sweep)
-      if (is.null(tol_pct)) stop("could not choose a tolerance", call. = FALSE)
+      tol_pct <- fallback_tolerance(sweep, res_px_pct)
+      if (is.null(tol_pct))
+        stop(sprintf(paste0(
+          "could not choose a tolerance: at every tolerance >= 1 px (%.2f %%) some lane has ",
+          "two bands merged into one locus.%s\nCheck those bands in GelAnalyzer, or set one with --tol."),
+          res_px_pct,
+          if (!is.na(floor_px)) sprintf(" Closest pair: lane %s, %s and %s px (%d px apart).",
+                                        fp$lane[1], fp$px_a[1], fp$px_b[1], floor_px) else ""),
+          call. = FALSE)
       tol_source <- "automatic (no plateau; fewest contiguous-pixel cuts)"
     }
   }
@@ -556,9 +585,11 @@ run_binning <- function(band_file, out_dir, primer,
               max(tol_sweep)),
     paste0(ok(d$n_conflicts == 0),
            sprintf("no sample with 2 bands in the same locus (%d)", d$n_conflicts)),
-    paste0(ok(tol_pct <= max_tol_floor),
-           sprintf("bins no wider than the detection floor (%.2f %% vs %.2f %% = %s px)",
-                   tol_pct, max_tol_floor, floor_px)),
+    if (is.finite(max_tol_floor))
+      paste0(ok(tol_pct <= max_tol_floor),
+             sprintf("bins no wider than the detection floor (%.2f %% vs %.2f %% = %d px)",
+                     tol_pct, max_tol_floor, floor_px))
+    else "  note: detection floor not measurable (no lane has 2 or more bands); bin width not checked",
     paste0(ok(is.na(max_loci) || d$n_loci <= max_loci),
            sprintf("number of loci within what the gel can resolve (%d of at most ~%s)",
                    d$n_loci, max_loci)),
