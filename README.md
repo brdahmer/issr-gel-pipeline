@@ -46,4 +46,4 @@ Rscript combine_gels.R "data/samples_827.csv"
 
 See `--help`.
 
-See also **[docs/DOCUMENTATION.md](docs/DOCUMENTATION.md)**.
+See also **[DOCUMENTATION.md](DOCUMENTATION.md)**.
