@@ -5,8 +5,9 @@
 #   Rscript bin_gel.R "bands_Primer i5-Population2.csv"
 #
 # Sweeps a range of binning tolerances, automatically picks the MIDDLE of the
-# stable plateau (the longest range where the number of loci does not change
-# and no sample has two bands in the same locus), bins the bands into loci,
+# stable plateau (the longest range where the number of loci does not change,
+# no sample has two bands in the same locus, bins are no wider than the
+# detection floor and loci stay within the image's ceiling), bins the bands into loci,
 # and writes a SUMMARY.txt with a plain [OK]/[CHECK] checklist.
 #
 # Options:
@@ -139,10 +140,14 @@ fallback_tolerance <- function(sweep) {
 #' Longest run of consecutive tolerances (>= 1 px) with the same number of
 #' loci and no within-sample conflict. A tolerance with a conflict breaks the
 #' run, so two conflict-free runs separated by a conflict are never merged.
-find_plateau <- function(sweep, min_tol) {
+#' Optional physical limits also break the run: tolerances wider than
+#' `max_tol` (bins wider than the image can resolve) and locus counts above
+#' `max_loci` (more loci than the image can resolve).
+find_plateau <- function(sweep, min_tol, max_tol = Inf, max_loci = Inf) {
   v <- sweep[sweep$tol_pct >= min_tol, ]
-  if (!nrow(v) || !any(v$n_conflicts == 0)) return(NULL)
-  key <- ifelse(v$n_conflicts == 0, v$n_loci, NA)    # NA breaks a run in rle()
+  valid <- v$n_conflicts == 0 & v$tol_pct <= max_tol & v$n_loci <= max_loci
+  if (!nrow(v) || !any(valid)) return(NULL)
+  key <- ifelse(valid, v$n_loci, NA)                 # NA breaks a run in rle()
   r <- rle(key)
   end <- cumsum(r$lengths); start <- end - r$lengths + 1
   len <- ifelse(is.na(r$values), 0L, r$lengths)
@@ -273,15 +278,26 @@ run_binning <- function(band_file, out_dir, primer,
   msg("Maximum number of distinguishable positions: ~%s loci", max_loci)
 
   ## --- 3. Choose the tolerance ------------------------------------------------
-  plateau <- find_plateau(sweep, res_px_pct)
+  # A bin wider than the detection floor can join bands that this image can
+  # tell apart, so the plateau must also stay within the floor and the ceiling.
+  max_tol_floor <- if (is.na(floor_px)) Inf else floor_px * res_px_pct
+  plateau <- find_plateau(sweep, res_px_pct, max_tol_floor,
+                          if (is.na(max_loci)) Inf else max_loci)
+  plateau_physical <- !is.null(plateau)
+  if (!plateau_physical) plateau <- find_plateau(sweep, res_px_pct)
   ok_sweep <- sweep[sweep$n_conflicts == 0 & sweep$tol_pct >= res_px_pct, ]
   max_tol_no_conflict <- if (nrow(ok_sweep)) max(ok_sweep$tol_pct) else NA
   msg("")
   msg("--- Tolerance sweep ---")
   msg("Largest tolerance without within-sample merging: %.2f %%", max_tol_no_conflict)
+  if (is.finite(max_tol_floor))
+    msg("Largest tolerance within the detection floor   : %.2f %% (%d px)",
+        max_tol_floor, floor_px)
   if (!is.null(plateau))
-    msg("Stable plateau: %.2f-%.2f %% -> %d loci (middle: %.2f %%)",
-        plateau$tol_min, plateau$tol_max, plateau$n_loci, plateau$tol_mid)
+    msg("Stable plateau: %.2f-%.2f %% -> %d loci (middle: %.2f %%)%s",
+        plateau$tol_min, plateau$tol_max, plateau$n_loci, plateau$tol_mid,
+        if (plateau_physical) "" else
+          "\n  WARNING: no plateau fits within the detection floor and locus ceiling; using the longest plateau anyway")
 
   tol_source <- "set by user (--tol)"
   if (identical(tol_pct, "auto")) {
@@ -540,6 +556,9 @@ run_binning <- function(band_file, out_dir, primer,
               max(tol_sweep)),
     paste0(ok(d$n_conflicts == 0),
            sprintf("no sample with 2 bands in the same locus (%d)", d$n_conflicts)),
+    paste0(ok(tol_pct <= max_tol_floor),
+           sprintf("bins no wider than the detection floor (%.2f %% vs %.2f %% = %s px)",
+                   tol_pct, max_tol_floor, floor_px)),
     paste0(ok(is.na(max_loci) || d$n_loci <= max_loci),
            sprintf("number of loci within what the gel can resolve (%d of at most ~%s)",
                    d$n_loci, max_loci)),
