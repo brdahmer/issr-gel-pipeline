@@ -18,7 +18,7 @@ Reads the `.gap` file from GelAnalyzer after manual scoring/annotation. Typicall
    between neighboring ladder bands. Any bands migrating beyond the ladder range are marked `extrapolated = 1`.
      - `--mw-model exp` fits a single global curve `bp = a·exp(−b·Rf) + c` instead if the gel fits an exponential curve.
    
-3. **Densitometry:** Analyzes the embedded gel picture to calculate peak height and background-subtracted volume for every lane. If a lane volume falls below 20% of the median lane intensity, the lane is reported as weak (*possible PCR failure*) but are not automatically removed.
+3. **Densitometry:** Analyzes the embedded gel picture to calculate peak height and background-subtracted volume for every lane. If a lane volume falls below 20% of the median lane intensity (a lane with no band marked counts as 0), the lane is reported as weak (*possible PCR failure*) but is not automatically removed. Ladder sizes must decrease down the gel; otherwise the script stops and names the offending sizes. With `--ladder-lane`, only that lane calibrates the sizes.
 
 **Outputs** (files are saved directly alongisde the `.gap` file or in a folder specified with `--out`):
 
@@ -55,7 +55,7 @@ Classified clean and sized bands into genetic markers (loci). Groups bands of si
 
 1. **Clustering:** Runs one-dimensional complete linkage hierarchical clustering on the log10(bp) size of bands and cuts the tree so that no locus spans wider than a set % tolerance (`tol`). Tolerance values <1 px are ignored.
 
-2. **Tolerance scan and plateau:** Scans across `tol` values from 0.5% to 15%, and defines the stable plateau as the longest run of consecutive `tol` values where (a) the number of loci remains stable, (b) no single individual sample has two of its own bands compressed into the same locus bin, (c) `tol` is no wider than the detection floor (the smallest separation between two bands in one lane, in px × % per px), and (d) the number of loci does not exceed the physical ceiling. Under (c) and (d), a run must cover at least 3 consecutive `tol` values (0.5%) to count as stable. The lane and bands that set the detection floor are printed, since one band marked twice in GelAnalyzer lowers the floor for the whole gel. If no run satisfies (c) and (d), the longest run satisfying (a) and (b) is used and a warning is printed. The middle of the plateau is automatically employed unless `--tol` is used.
+2. **Tolerance scan and plateau:** Scans across `tol` values from 0.5% to 15%, and defines the stable plateau as the longest run of consecutive `tol` values where (a) the number of loci remains stable, (b) no single individual sample has two of its own bands compressed into the same locus bin, (c) `tol` is no wider than the detection floor (the smallest separation between two bands in one lane, in px × % per px). The % of MW worth one pixel is measured between neighbouring ladder bands, because it is larger at the top and bottom of the gel; the floor uses the finest resolution where there are bands and "at least 1 px" uses the coarsest, and (d) the number of loci does not exceed the physical ceiling. Under (c) and (d), a run must cover at least 3 consecutive `tol` values (0.5%) to count as stable. The lane and bands that set the detection floor are printed, since one band marked twice in GelAnalyzer lowers the floor for the whole gel. If no run satisfies (c) and (d), the longest run satisfying (a) and (b) is used and a warning is printed. The middle of the plateau is automatically employed unless `--tol` is used.
 
 3. **Quality checks:** Writes a report in `SUMMARY.txt`;
    - *merged bands*: Warns if `tol` is too high, causing two distinct bands from the same individual to fuse into one locus.
@@ -123,7 +123,7 @@ The script expects to find `results_<gel>/` folders and `calibration_<gel>.json`
 
 3. **Replicate handling:** If one individual is ran on both gels as a quality check, it is compressed into a single entry in the final matrix, then calculates the %agreement between the two gel runs.
 
-4. **Gel-effect test:** If a population is spread over two or more gels, the script extracts those specific groups and runs an AMOVA to calculate PhiPT between the gels alongside a locus-by-locus with Fisher's test.
+4. **Gel-effect test:** If a population is spread over two or more gels, the script extracts those specific groups and runs an AMOVA to calculate PhiPT between the gels alongside a locus-by-locus Fisher's exact test (p-values adjusted across loci with Benjamini-Hochberg; loci are flagged at q < 0.05).
      - If this returns a highly significant p-value, warns the user that it likely reflects physical gel artifact.
      - Also warns the user if populations and gels are completely confounded, _e.g.,_ Population 1 was ran on Gel A and Population 2 was ran on Gel B, etc., and separating biological from mechanical differences is relatively impossible.
 
@@ -142,8 +142,6 @@ The script expects to find `results_<gel>/` folders and `calibration_<gel>.json`
 | `pcoa_*.pdf/png` | scatter plot designed to visually isolate population grouping from gel-run cluster patterns |
 | `combination_log.txt` | log of the run |
 
-
-**Command-Line Arguments**
 
 **Command-Line Arguments**
 ```

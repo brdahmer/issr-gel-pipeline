@@ -79,7 +79,7 @@ bin_bands <- function(df, tol_pct, samples, primer, type = "width",
       stringsAsFactors = FALSE)
   }))
   bins <- bins[order(bins$bin), ]
-  bins$locus <- sprintf("%s_%dbp", primer, round(bins$mean_mw_bp))
+  bins$locus <- make.unique(sprintf("%s_%dbp", primer, round(bins$mean_mw_bp)), sep = "_")
   rownames(bins) <- NULL
 
   # gap (%) to the next smaller bin. A threshold cut can leave neighbouring
@@ -87,13 +87,14 @@ bin_bands <- function(df, tol_pct, samples, primer, type = "width",
   bins$gap_below_pct <- c(
     (head(bins$min_mw_bp, -1) / tail(bins$max_mw_bp, -1) - 1) * 100, NA)
 
-  # gap in PIXELS to the previous bin. Bins are in decreasing MW, i.e.
-  # increasing pixel position. A 1-px gap means the boundary cuts through a
-  # CONTINUOUS run of observed positions: the data show no separation there
-  # and the split is an artefact of the threshold.
+  # gap in PIXELS to the next smaller bin (same neighbour as gap_below_pct).
+  # Bins are in decreasing MW, i.e. increasing pixel position. A gap of 1 px
+  # or less means the boundary cuts through a CONTINUOUS run of observed
+  # positions (0 px: bands at the same pixel end up on both sides): the data
+  # show no separation there and the split is an artefact of the threshold.
   pxs <- split(df$peak_px, df$bin)
-  bins$gap_px <- c(NA, vapply(seq_len(nrow(bins))[-1], function(i)
-    min(pxs[[as.character(i)]]) - max(pxs[[as.character(i - 1)]]), numeric(1)))
+  bins$gap_below_px <- c(vapply(seq_len(nrow(bins) - 1), function(i)
+    min(pxs[[as.character(i + 1)]]) - max(pxs[[as.character(i)]]), numeric(1)), NA)
 
   # Single linkage only cuts where there is a gap wider than the tolerance.
   # If complete and single linkage give the SAME partition, the grouping is
@@ -118,7 +119,7 @@ bin_bands <- function(df, tol_pct, samples, primer, type = "width",
     n_ambiguous_boundaries = sum(bins$gap_below_pct < tol_pct, na.rm = TRUE),
     n_boundaries      = nrow(bins) - 1,
     min_gap_pct       = suppressWarnings(min(bins$gap_below_pct, na.rm = TRUE)),
-    n_contiguous_cuts = sum(bins$gap_px == 1, na.rm = TRUE),
+    n_contiguous_cuts = sum(bins$gap_below_px <= 1, na.rm = TRUE),
     linkages_agree    = agree,
     n_polymorphic     = sum(colSums(mat) > 0 & colSums(mat) < nrow(mat)),
     n_monomorphic     = sum(colSums(mat) == nrow(mat)),
@@ -156,6 +157,38 @@ find_plateau <- function(sweep, min_tol, max_tol = Inf, max_loci = Inf, min_len 
   if (len[i] < min_len) return(NULL)
   list(n_loci = r$values[i], tol_min = v$tol_pct[start[i]], tol_max = v$tol_pct[end[i]],
        tol_mid = mean(c(v$tol_pct[start[i]], v$tol_pct[end[i]])))
+}
+
+#' Local resolution: % of MW per pixel of migration at each size in `mw`.
+#'
+#' Measured on the ladder, between neighbouring ladder sizes (the slope of
+#' log10(bp) against position in the corrected frame); a size outside the
+#' ladder takes the nearest end segment. Falls back to one straight-line fit
+#' of all bands if the ladder has fewer than 2 sizes.
+pct_per_px <- function(all_bands, mw) {
+  pos <- if ("peak_px_corrected" %in% names(all_bands)) all_bands$peak_px_corrected
+         else all_bands$peak_px
+  lad <- all_bands$ladder == 1
+  if (length(unique(all_bands$mw_bp[lad])) < 2) {
+    slope <- coef(lm(log10(all_bands$mw_bp) ~ pos))[2]
+    return(rep(unname((10^abs(slope) - 1) * 100), length(mw)))
+  }
+  px <- tapply(pos[lad], all_bands$mw_bp[lad], mean)      # mean position per size
+  sz <- as.numeric(names(px))                            # increasing bp
+  seg_pct <- (10^(abs(diff(log10(sz)) / diff(px))) - 1) * 100
+  i <- findInterval(mw, sz, all.inside = TRUE)            # segment holding each size
+  unname(seg_pct[i])
+}
+
+#' Number of lanes in the gel, from calibration_<gel>.json written by step 1
+#' next to the band file (the band table alone misses trailing empty lanes).
+n_lanes_from_calibration <- function(band_file, fallback) {
+  cal <- file.path(dirname(band_file),
+                   sub("^bands_", "calibration_", sub("\\.csv$", ".json", basename(band_file))))
+  if (!file.exists(cal)) return(fallback)
+  j <- paste(readLines(cal, warn = FALSE), collapse = "")
+  n <- suppressWarnings(as.integer(sub('^.*?"n_lanes": *([0-9]+).*$', "\\1", j, perl = TRUE)))
+  if (is.na(n)) fallback else max(n, fallback)
 }
 
 #' Dominant-marker diversity per locus from band frequency f.
@@ -202,20 +235,28 @@ run_binning <- function(band_file, out_dir, primer,
   msg("Without ladder     : %d bands in %d samples", nrow(bands),
       length(unique(bands$sample)))
 
-  empty_lanes <- setdiff(seq_len(max(all_bands$lane)), unique(all_bands$lane))
-  excluded <- intersect(exclude_lanes, unique(bands$lane))
+  n_lanes <- n_lanes_from_calibration(band_file, max(all_bands$lane))
+  ladder_lanes <- unique(all_bands$lane[all_bands$ladder == 1])
+  sample_lanes <- setdiff(seq_len(n_lanes), ladder_lanes)
+  empty_lanes  <- setdiff(sample_lanes, unique(bands$lane))
+  excluded <- intersect(exclude_lanes, sample_lanes)
 
-  # very weak lanes (warning only; measured with ALL sample lanes)
+  # very weak lanes (warning only; measured with ALL sample lanes, and a lane
+  # with no band at all counts as volume 0: the clearest PCR failure)
   weak_lanes <- integer(0)
   if ("raw_volume" %in% names(bands) && any(!is.na(bands$raw_volume))) {
-    tot <- tapply(bands$raw_volume, bands$lane, sum, na.rm = TRUE)
+    tot <- setNames(numeric(length(sample_lanes)), sample_lanes)
+    v <- tapply(bands$raw_volume, bands$lane, sum, na.rm = TRUE)
+    tot[names(v)] <- v
     weak_lanes <- as.integer(names(tot)[tot < median(tot) / 5])
   }
   if (length(exclude_lanes)) {
     bands <- bands[!bands$lane %in% exclude_lanes, ]
     msg("Excluded lanes (--exclude): %s", paste(excluded, collapse = ", "))
     weak_lanes <- setdiff(weak_lanes, exclude_lanes)
+    empty_lanes <- setdiff(empty_lanes, exclude_lanes)
   }
+  samples_before <- unique(bands$sample)
 
   n_before <- nrow(bands)
   if (!is.null(mw_min)) bands <- bands[bands$mw_bp >= mw_min, ]
@@ -235,19 +276,29 @@ run_binning <- function(band_file, out_dir, primer,
     return(invisible(list(status = "INSUFFICIENT", primer = primer,
                           n_bands = nrow(bands))))
   }
-  samples <- sort(unique(bands$sample))
+  samples <- unique(bands$sample[order(bands$lane)])   # lane order (L100 after L99)
+  lost <- setdiff(samples_before, samples)
+  if (length(lost))
+    msg("WARNING: no band left after the filters in %s (not in the matrix)",
+        paste(lost, collapse = ", "))
 
   ## --- physical resolution of the gel ---------------------------------------
-  # Band positions are integer pixels and the calibration is close to
-  # exponential, so a 1-px step is always about the same % of MW. A tolerance
-  # SMALLER than this step cannot group anything.
-  slope  <- coef(lm(log10(mw_bp) ~ peak_px, data = all_bands))[2]
-  res_px_pct <- unname((10^abs(slope) - 1) * 100)
-  msg("Gel resolution     : 1 px = %.2f %% of MW (%d px per lane)",
-      res_px_pct, bands$lane_length_px[1])
-  if (is.numeric(tol_pct) && tol_pct < res_px_pct)
-    warning(sprintf("--tol (%.2f%%) is below the 1-pixel resolution (%.2f%%): nothing can be grouped.",
-                    tol_pct, res_px_pct), call. = FALSE)
+  # How many % of MW one pixel of migration is worth. It is NOT constant: the
+  # size-mobility curve flattens at both ends of the gel, so 1 px is a larger
+  # % of MW there. It is measured between neighbouring ladder bands, at the
+  # position of every sample band, and summarised as a range:
+  #   res_lo : finest resolution where there are bands (fewest % per px)
+  #   res_hi : coarsest resolution where there are bands (most % per px)
+  #   res_px_pct : median, used only for display
+  res_band   <- pct_per_px(all_bands, bands$mw_bp)
+  res_lo     <- min(res_band); res_hi <- max(res_band)
+  res_px_pct <- median(res_band)
+  msg("Gel resolution     : 1 px = %.2f-%.2f %% of MW where there are bands (median %.2f %%; %d px per lane)",
+      res_lo, res_hi, res_px_pct, bands$lane_length_px[1])
+  if (is.numeric(tol_pct) && tol_pct < res_lo)
+    warning(sprintf("--tol (%.2f%%) is below 1 pixel everywhere on the gel (>= %.2f%%): nothing can be grouped.",
+                    tol_pct, res_lo), call. = FALSE)
+  px_range <- function(t) sprintf("%.1f-%.1f px", t / res_hi, t / res_lo)
 
   bin_at <- function(t, force = NULL)
     bin_bands(bands, t, samples, primer, tol_type, variable, linkage, force)
@@ -255,7 +306,8 @@ run_binning <- function(band_file, out_dir, primer,
   ## --- 2. Tolerance sweep ----------------------------------------------------
   sweep <- do.call(rbind, lapply(tol_sweep, function(t) {
     d <- bin_at(t)$diag
-    data.frame(tol_pct = t, tol_px = round(t / res_px_pct, 2), cut_height = d$cut_height,
+    data.frame(tol_pct = t, tol_px_min = round(t / res_hi, 2), tol_px_max = round(t / res_lo, 2),
+               cut_height = d$cut_height,
                n_loci = d$n_loci, n_conflicts = d$n_conflicts,
                n_polymorphic = d$n_polymorphic, n_singletons = d$n_singletons,
                max_span_pct = d$max_span_pct,
@@ -298,21 +350,22 @@ run_binning <- function(band_file, out_dir, primer,
   ## --- 3. Choose the tolerance ------------------------------------------------
   # A bin wider than the detection floor can join bands that this image can
   # tell apart, so the plateau must also stay within the floor and the ceiling.
-  max_tol_floor <- if (is.na(floor_px)) Inf else floor_px * res_px_pct
+  # the floor is in pixels, so it must hold where 1 px is the smallest % (res_lo)
+  max_tol_floor <- if (is.na(floor_px)) Inf else floor_px * res_lo
   # at least 3 sweep steps (0.5 %), so a single tolerance squeezed in under a
   # low floor never counts as "stable"
-  plateau <- find_plateau(sweep, res_px_pct, max_tol_floor,
+  plateau <- find_plateau(sweep, res_hi, max_tol_floor,
                           if (is.na(max_loci)) Inf else max_loci, min_len = 3)
   plateau_physical <- !is.null(plateau)
-  if (!plateau_physical) plateau <- find_plateau(sweep, res_px_pct, min_len = 3)
-  ok_sweep <- sweep[sweep$n_conflicts == 0 & sweep$tol_pct >= res_px_pct, ]
+  if (!plateau_physical) plateau <- find_plateau(sweep, res_hi, min_len = 3)
+  ok_sweep <- sweep[sweep$n_conflicts == 0 & sweep$tol_pct >= res_hi, ]
   max_tol_no_conflict <- if (nrow(ok_sweep)) max(ok_sweep$tol_pct) else NA
   msg("")
   msg("--- Tolerance sweep ---")
   msg("Largest tolerance without within-sample merging: %.2f %%", max_tol_no_conflict)
   if (is.finite(max_tol_floor))
-    msg("Largest tolerance within the detection floor   : %.2f %% (%d px)",
-        max_tol_floor, floor_px)
+    msg("Largest tolerance within the detection floor   : %.2f %% (%d px where 1 px = %.2f %%)",
+        max_tol_floor, floor_px, res_lo)
   if (!is.null(plateau))
     msg("Stable plateau: %.2f-%.2f %% -> %d loci (middle: %.2f %%)%s",
         plateau$tol_min, plateau$tol_max, plateau$n_loci, plateau$tol_mid,
@@ -328,12 +381,12 @@ run_binning <- function(band_file, out_dir, primer,
       tol_source <- sprintf("automatic: middle of plateau %.2f-%.2f %%",
                             plateau$tol_min, plateau$tol_max)
     } else {
-      tol_pct <- fallback_tolerance(sweep, res_px_pct)
+      tol_pct <- fallback_tolerance(sweep, res_hi)
       if (is.null(tol_pct))
         stop(sprintf(paste0(
           "could not choose a tolerance: at every tolerance >= 1 px (%.2f %%) some lane has ",
           "two bands merged into one locus.%s\nCheck those bands in GelAnalyzer, or set one with --tol."),
-          res_px_pct,
+          res_hi,
           if (!is.na(floor_px)) sprintf(" Closest pair: lane %s, %s and %s px (%d px apart).",
                                         fp$lane[1], fp$px_a[1], fp$px_b[1], floor_px) else ""),
           call. = FALSE)
@@ -346,7 +399,7 @@ run_binning <- function(band_file, out_dir, primer,
   if (screen_only) {
     msg("")
     msg("--- SCREEN: loci per tolerance (tolerances >= 1 px only) ---")
-    v <- sweep[sweep$tol_pct >= res_px_pct & (sweep$tol_pct * 2) %% 1 == 0, ]
+    v <- sweep[sweep$tol_pct >= res_hi & (sweep$tol_pct * 2) %% 1 == 0, ]
     for (i in seq_len(nrow(v)))
       msg("  %5.2f %%  %3d loci  %2d singletons  %s%s", v$tol_pct[i], v$n_loci[i],
           v$n_singletons[i],
@@ -380,7 +433,8 @@ run_binning <- function(band_file, out_dir, primer,
 
   msg("")
   msg("--- Final binning (tolerance = %.2f %%, cut h = %.5f in log10) ---", tol_pct, d$cut_height)
-  msg("Equivalent to         : %.2f pixels of migration", tol_pct / res_px_pct)
+  msg("Equivalent to         : %s of migration (wider in px mid-gel, narrower at the ends)",
+      px_range(tol_pct))
   msg("Loci (bins)           : %d", d$n_loci)
   msg("Polymorphic           : %d (%.1f %%)", d$n_polymorphic, 100 * d$n_polymorphic / d$n_loci)
   msg("Monomorphic           : %d", d$n_monomorphic)
@@ -444,8 +498,10 @@ run_binning <- function(band_file, out_dir, primer,
     mean_he = round(mean(dv$he), 4), mean_shannon_i = round(mean(dv$shannon_i), 4),
     mean_pic = round(mean(dv$pic), 4),
     mean_bands_per_sample = round(mean(rowSums(mat)), 2),
-    tolerance_pct = tol_pct, tolerance_px = round(tol_pct / res_px_pct, 2),
+    tolerance_pct = tol_pct,
+    tolerance_px_min = round(tol_pct / res_hi, 2), tolerance_px_max = round(tol_pct / res_lo, 2),
     resolution_1px_pct = round(res_px_pct, 3),
+    resolution_1px_pct_min = round(res_lo, 3), resolution_1px_pct_max = round(res_hi, 3),
     n_ambiguous_boundaries = d$n_ambiguous_boundaries,
     n_contiguous_cuts = d$n_contiguous_cuts, unique_grouping = d$linkages_agree,
     detection_floor_px = floor_px, max_loci = max_loci,
@@ -498,7 +554,7 @@ run_binning <- function(band_file, out_dir, primer,
          col = adjustcolor("steelblue", 0.15), border = NA)
   lines(sweep$tol_pct, sweep$n_loci, type = "s", lwd = 2)
   abline(v = res_px_pct * 1:8, col = "grey80", lty = 3)
-  mtext(sprintf("grey lines = multiples of 1 px (%.2f%%)", res_px_pct),
+  mtext(sprintf("grey lines = multiples of 1 px at the median resolution (%.2f%%)", res_px_pct),
         side = 3, line = 0.1, cex = 0.6, col = "grey40")
   abline(v = tol_pct, col = "firebrick", lty = 2)
   if (!is.na(max_loci)) abline(h = max_loci, col = "purple3", lty = 4, lwd = 2)
@@ -516,7 +572,7 @@ run_binning <- function(band_file, out_dir, primer,
          lty = 1, lwd = 2, col = c("darkorange3", "purple3", "firebrick"), bty = "n", cex = 0.75)
 
   # (c) band map: each point is a band, dotted lines = locus centres
-  plot(bands$mw_bp, as.integer(factor(bands$sample)), pch = 15, cex = 0.7, log = "x",
+  plot(bands$mw_bp, match(bands$sample, samples), pch = 15, cex = 0.7, log = "x",
        xlab = "Size (bp, log scale)", ylab = "Sample", yaxt = "n",
        main = "(c) Observed bands and loci")
   axis(2, at = seq_along(samples), labels = samples, las = 1, cex.axis = 0.5)
@@ -530,7 +586,7 @@ run_binning <- function(band_file, out_dir, primer,
   dev.off()
 
   pdf(file.path(out_dir, sprintf("matrix_%s.pdf", primer)), width = 10, height = 7)
-  image(t(mat[nrow(mat):1, , drop = FALSE]), col = c("white", "grey20"), axes = FALSE,
+  image(t(mat[nrow(mat):1, , drop = FALSE]), col = c("white", "grey20"), zlim = c(0, 1), axes = FALSE,
         main = sprintf("Presence/absence matrix - primer %s (tol %.1f%%)", primer, tol_pct))
   axis(2, at = seq(0, 1, length.out = nrow(mat)), labels = rev(rownames(mat)),
        las = 1, cex.axis = 0.55, tick = FALSE)
@@ -548,7 +604,8 @@ run_binning <- function(band_file, out_dir, primer,
   cat("Variable        :", variable, "| linkage:", linkage, "\n")
   cat("Tolerance       :", tol_pct, "% (", tol_type, ") -", tol_source, "\n")
   cat("Cut height      :", d$cut_height, "\n")
-  cat("1-px resolution :", round(res_px_pct, 3), "% of MW\n")
+  cat("1-px resolution :", round(res_lo, 3), "-", round(res_hi, 3), "% of MW (median",
+      round(res_px_pct, 3), ")\n")
   cat("Detection floor :", floor_px, "px | locus ceiling:", max_loci, "\n")
   cat("Seed            :", seed, "\n\n")
   print(summary_df)
@@ -613,6 +670,9 @@ run_binning <- function(band_file, out_dir, primer,
     if (length(excluded)) sprintf("  Excluded lanes (--exclude): %s", paste(excluded, collapse = ", ")),
     if (length(empty_lanes))
       sprintf("  Lanes with no band marked (not in the matrix): %s", paste(empty_lanes, collapse = ", ")),
+    if (length(lost))
+      sprintf("  Samples with every band removed by the filters (not in the matrix): %s",
+              paste(lost, collapse = ", ")),
     if (n_outside_ladder > 0)
       sprintf("  Bands outside the ladder range dropped: %d (use --keep-outside-ladder to keep them)",
               n_outside_ladder),
