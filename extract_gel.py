@@ -959,6 +959,11 @@ def run(gap, curve_mode="auto", out_dir=None, ladder_lane=None, mw_model="interp
     print(f"  MW model: {meta['mw_model']}")
     print(f"  ladder range: {meta['ladder_range_bp'][0]:g}-{meta['ladder_range_bp'][1]:g} bp"
           f" | bands outside it: {meta['n_extrapolated_bands']}")
+    lengths = sorted({L["length"] for L in lanes})
+    if len(lengths) > 1:
+        print(f"  WARNING: lanes have different lengths ({lengths[0]}-{lengths[-1]} px). "
+              "peak_px is Rf x lane length, so pixel-based checks in step 2 mix scales;\n"
+              "    give all lanes the same length in GelAnalyzer.")
     sample_lanes = [li for li in range(1, meta["n_lanes"] + 1)
                     if li not in meta["ladder_lanes"]]
     empty = sorted(set(sample_lanes) - {r["lane"] for r in samples})
