@@ -29,18 +29,18 @@ Files are written next to the `.gap` file, or to the folder given with `--out`.
 `peak_px` is the band position after the tilt and smile correction, rounded to whole pixels. Step 2 uses it for its pixel-based checks.
 
 ### Command-line options
+```bash
+python3 extract_gel.py "gel-data.gap"
 ```
-Core execution syntax:
-python extract_gel.py "gel-data.gap" --curves auto --mw-model interp
 
-Custom flags:
---curves [auto|drawn|none]    # Pick geometric correction behavior
---mw-model [interp|exp]       # Pick size interpolation vs. exponential curve fitting
---ladder-lane N               # Specify a custom lane as ladder
---out DIR                     # Set custom output destination
---no-tilt-correction          # Force-disable automated tilt adjustment
---validate EXPORT.csv         # Compares Rf and bp against GelAnalyzer's own Bands Information table
---auto-tol-px / --auto-min-frac # Finetune row tracking thresholds
+```
+--curves auto|drawn|none        tilt and smile correction (default: auto)
+--mw-model interp|exp           size calibration: interpolation (default) or exponential fit
+--ladder-lane N                 use lane N as the ladder (default: every lane with sizes assigned)
+--out DIR                       output folder (default: the folder of the .gap)
+--no-tilt-correction            do not remove the gel tilt when tracking rows of bands
+--validate EXPORT.csv           compare Rf and bp with GelAnalyzer's "Bands Information" export
+--auto-tol-px, --auto-min-frac  row-tracking settings (defaults 3 px and 0.5 of the lanes)
 ```
 
 ---
@@ -92,17 +92,17 @@ Written to `results_<gel>/`.
 | `analysis_log.txt` | parameters, results and R session details |
 
 ### Command-line options
-```
-Core execution syntax
+```bash
 Rscript bin_gel.R "bands_gel_i5.csv"
+```
 
-# Custom tweaks
---screen               # Run a quick trial; prints the sweep table only then exits
---tol 6.5              # Bypass auto-optimization and enforce a fixed percentage tolerance
---exclude 9,10         # Completely drop specific low-quality lanes from the matrix
---merge 471+515        # Force-fuse artifactual split bins into a single locus
---keep-outside-ladder  # Prevent the script from discarding extrapolated bands
---out DIR              # Redirect all output files to a custom directory 
+```
+--screen               print the loci at each tolerance and the suggested one, then stop
+--tol 6.5              use this tolerance (%) instead of the automatic choice
+--exclude 9,10         leave these lanes out (e.g. failed PCR)
+--merge 471+515        join these loci (sizes in bp) into one; several groups: 471+515,1333+1399
+--keep-outside-ladder  keep bands outside the ladder range (dropped by default)
+--out DIR              output folder (default: results_<gel>/ next to the band file)
 ```
 
 ---
@@ -153,17 +153,17 @@ Written to `results_<primer>_combined/`.
 | `combination_log.txt` | log of the run |
 
 ### Command-line options
+```bash
+Rscript combine_gels.R "samples_827.csv"
 ```
-Basic cross-gel merge execution
-Rscript combine_gels.R "my_sample_sheet.csv"
 
-# Advanced parameters
---tol X                      # Force a specific cross-gel size tolerance and bypass auto-anchoring
---dir DIR                    # Location of Step 2 folders and JSON files
---out DIR                    # Redirect all outputs to a specific directory
---name PRIMER                # Define a specific name tag for your outputs
---permutations N             # Adjust the total number of random shuffles for AMOVA significance
---shift tier=percent[,tier=percent] # Intentionally shift specific gel sizes by a percentage to correct drift
+```
+--tol 4                  matching tolerance (%) between gels, instead of the automatic choice
+--dir DIR                folder with the step 1 and 2 outputs (default: the folder of the sheet)
+--out DIR                output folder (default: results_<primer>_combined/)
+--name PRIMER            name used in output files (default: from the sheet's file name)
+--permutations N         permutations for the PhiPT tests (default 999)
+--shift tier=-9.4[,...]  shift one gel's sizes by a % before matching, to correct calibration drift
 ```
 
 ---
