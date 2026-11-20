@@ -43,4 +43,6 @@ Rscript combine_gels.R "data/samples_827.csv"
 #   -> results_827_combined/SUMMARY.txt, combined_matrix.csv
 ```
 
-Each script lists its options with `--help`. [DOCUMENTATION.md](DOCUMENTATION.md) explains how each step works and what it writes.
+Each script lists its options with `--help`.
+
+See also[DOCUMENTATION.md](DOCUMENTATION.md)
