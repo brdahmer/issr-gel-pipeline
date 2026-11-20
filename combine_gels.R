@@ -187,6 +187,10 @@ combine <- function(sheet_file, folder = NULL, tol = NA, out = NULL, name = NULL
                       ifelse(f$individual != "", paste0(" (", f$individual, ")"), "")), collapse = "; "))
   }
   S <- S_all[use, ]
+  dup_lane <- duplicated(S[, c("tier", "lane")])
+  if (any(dup_lane))
+    stop("the same lane is used for more than one row of the sheet: ",
+         paste(sprintf("%s lane %d", S$tier[dup_lane], S$lane[dup_lane]), collapse = "; "))
   if (any(duplicated(S$individual)))
     msg("NOTE: individual repeated in the sheet: %s (only the first occurrence enters the matrix; the others are used as replicates)",
         paste(unique(S$individual[duplicated(S$individual)]), collapse = ", "))
@@ -286,12 +290,15 @@ combine <- function(sheet_file, folder = NULL, tol = NA, out = NULL, name = NULL
     }
   }
   g <- cluster_loci(L, tol)
-  kp <- which(sapply(seq_len(nrow(plat)), function(i)
-    tol >= plat$start[i] - 1e-9 && tol <= plat$end[i] + 0.2499))[1]
+  # the chosen plateau is the run whose partition equals the one used
+  kp <- match(partition_signature(g, L), runs$values)
   msg("\n--- Sweep (number of combined loci per tolerance) ---")
   for (i in seq_len(nrow(plat))) msg("  %5.2f - %5.2f %%  -> %2d loci%s", plat$start[i], plat$end[i],
                                     plat$n[i], ifelse(i == kp, "   <== chosen", ""))
   msg("Tolerance for matching loci between tiers: %.2f %% (%s)", tol, tol_source)
+  if (is.na(kp))
+    msg("WARNING: the grouping at %.2f %% is not seen anywhere in the %.2f-%.2f %% sweep; no sensitivity check",
+        tol, min(tols), max(tols))
   in_plateau <- !is.na(kp) && plat$len[kp] >= 4
 
   ## --- combined loci table ---------------------------------------------------------------
@@ -311,8 +318,9 @@ combine <- function(sheet_file, folder = NULL, tol = NA, out = NULL, name = NULL
   first <- !duplicated(A$individual)
   for (ind in unique(A$individual[!first])) {
     r <- which(A$individual == ind)
-    msg("Replicate %s (%s x %s): %.0f%% of loci identical", ind, A$tier[r[1]], A$tier[r[2]],
-        100 * mean(X_all[r[1], ] == X_all[r[2], ]))
+    for (k in r[-1])
+      msg("Replicate %s (%s lane %d x %s lane %d): %.0f%% of loci identical", ind,
+          A$tier[r[1]], A$lane[r[1]], A$tier[k], A$lane[k], 100 * mean(X_all[r[1], ] == X_all[k, ]))
   }
   A_all <- A
   X <- X_all[first, , drop = FALSE]; A <- A[first, ]
@@ -333,8 +341,9 @@ combine <- function(sheet_file, folder = NULL, tol = NA, out = NULL, name = NULL
       if (all(tb[, 2] == 0) || all(tb[, 1] == 0)) NA else fisher.test(tb)$p.value
     })
     names(fis) <- colnames(X)
-    sig <- names(fis)[!is.na(fis) & fis < 0.05]
-    msg("  %s on %s: PhiPT between tiers = %.3f (p = %.3f); loci with different frequency (Fisher p < 0.05): %s",
+    fdr <- p.adjust(fis, method = "BH")           # many loci tested: control the FDR
+    sig <- names(fdr)[!is.na(fdr) & fdr < 0.05]
+    msg("  %s on %s: PhiPT between tiers = %.3f (p = %.3f); loci with different frequency (Fisher, BH-adjusted q < 0.05): %s",
         p, paste(ts, collapse = " x "), ph["phipt"], ph["p"],
         if (length(sig)) paste(sprintf("%s (%s)", sig, sapply(sig, function(s)
           paste(sprintf("%.0f%%", 100 * tapply(X[idx, s], A$tier[idx], mean)[ts]), collapse = " x "))),
@@ -343,6 +352,7 @@ combine <- function(sheet_file, folder = NULL, tol = NA, out = NULL, name = NULL
                                  phipt = round(ph["phipt"], 4), p = ph["p"],
                                  n_different_loci = length(sig), different_loci = paste(sig, collapse = "; ")))
     loci[[paste0("fisher_p_tiers_", p)]] <- signif(fis, 3)
+    loci[[paste0("fisher_q_tiers_", p)]] <- signif(fdr, 3)
   }
 
   ## --- diversity and differentiation ------------------------------------------------------------
@@ -372,17 +382,20 @@ combine <- function(sheet_file, folder = NULL, tol = NA, out = NULL, name = NULL
     for (p in pops) row[[paste0("he_", p)]] <- round(diversity(Xs[A$population == p, , drop = FALSE])["he"], 4)
     SENS <- rbind(SENS, row)
   }
-  rownames(SENS) <- NULL
-  msg("\n--- Sensitivity (neighbouring tolerances) ---")
-  print(SENS, row.names = FALSE)
+  if (!is.null(SENS)) {
+    msg("\n--- Sensitivity (neighbouring tolerances) ---")
+    print(SENS, row.names = FALSE)
+  }
 
   ## --- UPGMA / Jaccard dendrogram with bootstrap over loci -----------------------------------------
   DJ <- dist(X, method = "binary")                 # Jaccard distance (as in step 2)
   hc <- hclust(DJ, method = "average")
   coph <- cor(DJ, cophenetic(hc))
   msg("\nUPGMA/Jaccard dendrogram: cophenetic correlation = %.3f", coph)
-  colours <- setNames(c("#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e", "#e6ab02")[seq_along(pops)], pops)
-  shapes  <- setNames(c(16, 17, 15, 18, 1, 2)[seq_along(tiers)], tiers)
+  palette6 <- c("#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e", "#e6ab02")
+  colours <- setNames(if (length(pops) <= 6) palette6[seq_along(pops)]
+                      else hcl.colors(length(pops), "Dark 3"), pops)
+  shapes  <- setNames(rep_len(c(16, 17, 15, 18, 1, 2, 0, 5, 6, 8), length(tiers)), tiers)
   if (requireNamespace("ape", quietly = TRUE)) {
     upgma <- function(m) ape::as.phylo(hclust(dist(m, method = "binary"), method = "average"))
     tree <- upgma(X)
@@ -421,7 +434,8 @@ combine <- function(sheet_file, folder = NULL, tol = NA, out = NULL, name = NULL
     jit <- jitter(pc$points, amount = 0.04 * diff(range(pc$points)))
     plot(jit, col = colours[A$population], pch = shapes[A$tier], cex = 1.4,
          xlab = sprintf("Axis 1 (%.1f%%)", pct[1]), ylab = sprintf("Axis 2 (%.1f%%)", pct[2]),
-         main = sprintf("PCoA - primer %s (%d individuals, %d loci)", name, nrow(X), ncol(X)))
+         main = sprintf("PCoA - primer %s (%d individuals, %d loci)", name, nrow(X), ncol(X)),
+         sub = "points jittered slightly so identical profiles stay visible", cex.sub = 0.7)
     legend(par("usr")[2], par("usr")[4], c(pops, tiers), col = c(colours, rep("grey30", length(tiers))),
            pch = c(rep(16, length(pops)), shapes), bty = "n", cex = 0.85, xpd = TRUE)
   }
@@ -435,7 +449,7 @@ combine <- function(sheet_file, folder = NULL, tol = NA, out = NULL, name = NULL
               file.path(out, "combined_matrix.txt"), sep = "\t", quote = FALSE, row.names = FALSE)
   write.csv(loci[, setdiff(names(loci), "k")], file.path(out, "combined_loci.csv"), row.names = FALSE)
   write.csv(DIV, file.path(out, "population_diversity.csv"), row.names = FALSE)
-  write.csv(SENS, file.path(out, "tolerance_sensitivity.csv"), row.names = FALSE)
+  if (!is.null(SENS)) write.csv(SENS, file.path(out, "tolerance_sensitivity.csv"), row.names = FALSE)
   if (!is.null(GEL)) write.csv(GEL, file.path(out, "gel_effect_test.csv"), row.names = FALSE)
 
   ## --- plain-language summary ----------------------------------------------------------------------------
@@ -478,8 +492,9 @@ combine <- function(sheet_file, folder = NULL, tol = NA, out = NULL, name = NULL
     "",
     sprintf("  PhiPT between populations: %.3f (p = %.3f)", ph_pop["phipt"], ph_pop["p"]),
     sprintf("  UPGMA/Jaccard dendrogram: dendrogram_%s.pdf (cophenetic r %.3f)", name, coph),
-    sprintf("  At neighbouring tolerances: PhiPT %s",
-            paste(sprintf("%.3f (%d loci, %.2f%%)", SENS$phipt_pop, SENS$n_loci, SENS$tolerance_pct), collapse = "; ")),
+    if (is.null(SENS)) "  At neighbouring tolerances: not computed (chosen grouping outside the sweep)"
+    else sprintf("  At neighbouring tolerances: PhiPT %s",
+                 paste(sprintf("%.3f (%d loci, %.2f%%)", SENS$phipt_pop, SENS$n_loci, SENS$tolerance_pct), collapse = "; ")),
     "",
     "  Limitations: without cross-gel replicates or a second ladder, locus matching",
     "  between tiers depends only on each ladder's calibration; the error was measured",

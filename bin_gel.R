@@ -79,7 +79,7 @@ bin_bands <- function(df, tol_pct, samples, primer, type = "width",
       stringsAsFactors = FALSE)
   }))
   bins <- bins[order(bins$bin), ]
-  bins$locus <- sprintf("%s_%dbp", primer, round(bins$mean_mw_bp))
+  bins$locus <- make.unique(sprintf("%s_%dbp", primer, round(bins$mean_mw_bp)), sep = "_")
   rownames(bins) <- NULL
 
   # gap (%) to the next smaller bin. A threshold cut can leave neighbouring
@@ -87,13 +87,14 @@ bin_bands <- function(df, tol_pct, samples, primer, type = "width",
   bins$gap_below_pct <- c(
     (head(bins$min_mw_bp, -1) / tail(bins$max_mw_bp, -1) - 1) * 100, NA)
 
-  # gap in PIXELS to the previous bin. Bins are in decreasing MW, i.e.
-  # increasing pixel position. A 1-px gap means the boundary cuts through a
-  # CONTINUOUS run of observed positions: the data show no separation there
-  # and the split is an artefact of the threshold.
+  # gap in PIXELS to the next smaller bin (same neighbour as gap_below_pct).
+  # Bins are in decreasing MW, i.e. increasing pixel position. A gap of 1 px
+  # or less means the boundary cuts through a CONTINUOUS run of observed
+  # positions (0 px: bands at the same pixel end up on both sides): the data
+  # show no separation there and the split is an artefact of the threshold.
   pxs <- split(df$peak_px, df$bin)
-  bins$gap_px <- c(NA, vapply(seq_len(nrow(bins))[-1], function(i)
-    min(pxs[[as.character(i)]]) - max(pxs[[as.character(i - 1)]]), numeric(1)))
+  bins$gap_below_px <- c(vapply(seq_len(nrow(bins) - 1), function(i)
+    min(pxs[[as.character(i + 1)]]) - max(pxs[[as.character(i)]]), numeric(1)), NA)
 
   # Single linkage only cuts where there is a gap wider than the tolerance.
   # If complete and single linkage give the SAME partition, the grouping is
@@ -118,7 +119,7 @@ bin_bands <- function(df, tol_pct, samples, primer, type = "width",
     n_ambiguous_boundaries = sum(bins$gap_below_pct < tol_pct, na.rm = TRUE),
     n_boundaries      = nrow(bins) - 1,
     min_gap_pct       = suppressWarnings(min(bins$gap_below_pct, na.rm = TRUE)),
-    n_contiguous_cuts = sum(bins$gap_px == 1, na.rm = TRUE),
+    n_contiguous_cuts = sum(bins$gap_below_px <= 1, na.rm = TRUE),
     linkages_agree    = agree,
     n_polymorphic     = sum(colSums(mat) > 0 & colSums(mat) < nrow(mat)),
     n_monomorphic     = sum(colSums(mat) == nrow(mat)),
@@ -156,6 +157,17 @@ find_plateau <- function(sweep, min_tol, max_tol = Inf, max_loci = Inf, min_len 
   if (len[i] < min_len) return(NULL)
   list(n_loci = r$values[i], tol_min = v$tol_pct[start[i]], tol_max = v$tol_pct[end[i]],
        tol_mid = mean(c(v$tol_pct[start[i]], v$tol_pct[end[i]])))
+}
+
+#' Number of lanes in the gel, from calibration_<gel>.json written by step 1
+#' next to the band file (the band table alone misses trailing empty lanes).
+n_lanes_from_calibration <- function(band_file, fallback) {
+  cal <- file.path(dirname(band_file),
+                   sub("^bands_", "calibration_", sub("\\.csv$", ".json", basename(band_file))))
+  if (!file.exists(cal)) return(fallback)
+  j <- paste(readLines(cal, warn = FALSE), collapse = "")
+  n <- suppressWarnings(as.integer(sub('^.*?"n_lanes": *([0-9]+).*$', "\\1", j, perl = TRUE)))
+  if (is.na(n)) fallback else max(n, fallback)
 }
 
 #' Dominant-marker diversity per locus from band frequency f.
@@ -202,20 +214,28 @@ run_binning <- function(band_file, out_dir, primer,
   msg("Without ladder     : %d bands in %d samples", nrow(bands),
       length(unique(bands$sample)))
 
-  empty_lanes <- setdiff(seq_len(max(all_bands$lane)), unique(all_bands$lane))
-  excluded <- intersect(exclude_lanes, unique(bands$lane))
+  n_lanes <- n_lanes_from_calibration(band_file, max(all_bands$lane))
+  ladder_lanes <- unique(all_bands$lane[all_bands$ladder == 1])
+  sample_lanes <- setdiff(seq_len(n_lanes), ladder_lanes)
+  empty_lanes  <- setdiff(sample_lanes, unique(bands$lane))
+  excluded <- intersect(exclude_lanes, sample_lanes)
 
-  # very weak lanes (warning only; measured with ALL sample lanes)
+  # very weak lanes (warning only; measured with ALL sample lanes, and a lane
+  # with no band at all counts as volume 0: the clearest PCR failure)
   weak_lanes <- integer(0)
   if ("raw_volume" %in% names(bands) && any(!is.na(bands$raw_volume))) {
-    tot <- tapply(bands$raw_volume, bands$lane, sum, na.rm = TRUE)
+    tot <- setNames(numeric(length(sample_lanes)), sample_lanes)
+    v <- tapply(bands$raw_volume, bands$lane, sum, na.rm = TRUE)
+    tot[names(v)] <- v
     weak_lanes <- as.integer(names(tot)[tot < median(tot) / 5])
   }
   if (length(exclude_lanes)) {
     bands <- bands[!bands$lane %in% exclude_lanes, ]
     msg("Excluded lanes (--exclude): %s", paste(excluded, collapse = ", "))
     weak_lanes <- setdiff(weak_lanes, exclude_lanes)
+    empty_lanes <- setdiff(empty_lanes, exclude_lanes)
   }
+  samples_before <- unique(bands$sample)
 
   n_before <- nrow(bands)
   if (!is.null(mw_min)) bands <- bands[bands$mw_bp >= mw_min, ]
@@ -235,7 +255,11 @@ run_binning <- function(band_file, out_dir, primer,
     return(invisible(list(status = "INSUFFICIENT", primer = primer,
                           n_bands = nrow(bands))))
   }
-  samples <- sort(unique(bands$sample))
+  samples <- unique(bands$sample[order(bands$lane)])   # lane order (L100 after L99)
+  lost <- setdiff(samples_before, samples)
+  if (length(lost))
+    msg("WARNING: no band left after the filters in %s (not in the matrix)",
+        paste(lost, collapse = ", "))
 
   ## --- physical resolution of the gel ---------------------------------------
   # Band positions are integer pixels and the calibration is close to
@@ -516,7 +540,7 @@ run_binning <- function(band_file, out_dir, primer,
          lty = 1, lwd = 2, col = c("darkorange3", "purple3", "firebrick"), bty = "n", cex = 0.75)
 
   # (c) band map: each point is a band, dotted lines = locus centres
-  plot(bands$mw_bp, as.integer(factor(bands$sample)), pch = 15, cex = 0.7, log = "x",
+  plot(bands$mw_bp, match(bands$sample, samples), pch = 15, cex = 0.7, log = "x",
        xlab = "Size (bp, log scale)", ylab = "Sample", yaxt = "n",
        main = "(c) Observed bands and loci")
   axis(2, at = seq_along(samples), labels = samples, las = 1, cex.axis = 0.5)
@@ -530,7 +554,7 @@ run_binning <- function(band_file, out_dir, primer,
   dev.off()
 
   pdf(file.path(out_dir, sprintf("matrix_%s.pdf", primer)), width = 10, height = 7)
-  image(t(mat[nrow(mat):1, , drop = FALSE]), col = c("white", "grey20"), axes = FALSE,
+  image(t(mat[nrow(mat):1, , drop = FALSE]), col = c("white", "grey20"), zlim = c(0, 1), axes = FALSE,
         main = sprintf("Presence/absence matrix - primer %s (tol %.1f%%)", primer, tol_pct))
   axis(2, at = seq(0, 1, length.out = nrow(mat)), labels = rev(rownames(mat)),
        las = 1, cex.axis = 0.55, tick = FALSE)
@@ -613,6 +637,9 @@ run_binning <- function(band_file, out_dir, primer,
     if (length(excluded)) sprintf("  Excluded lanes (--exclude): %s", paste(excluded, collapse = ", ")),
     if (length(empty_lanes))
       sprintf("  Lanes with no band marked (not in the matrix): %s", paste(empty_lanes, collapse = ", ")),
+    if (length(lost))
+      sprintf("  Samples with every band removed by the filters (not in the matrix): %s",
+              paste(lost, collapse = ", ")),
     if (n_outside_ladder > 0)
       sprintf("  Bands outside the ladder range dropped: %d (use --keep-outside-ladder to keep them)",
               n_outside_ladder),

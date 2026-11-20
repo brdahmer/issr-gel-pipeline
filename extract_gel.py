@@ -227,7 +227,7 @@ def decode_png(data):
         elif depth == 8 and colour == 3:
             grey.append([sum(plte[3 * v:3 * v + 3]) / 3 for v in row])
         elif depth == 8:
-            k = min(3, channels)
+            k = 1 if colour == 4 else 3            # grey+alpha: grey only; RGB(A): mean of RGB
             grey.append([sum(row[channels * i:channels * i + k]) / k for i in range(w)])
         else:
             raise RuntimeError(f"PNG with bit depth {depth} and colour type "
@@ -281,6 +281,18 @@ def rf_from_curves(curves, x, y):
 # =========================================================================== #
 # 4. Molecular-weight calibration
 # =========================================================================== #
+def _check_ladder_monotonic(rf_sorted, mw_sorted):
+    """Larger fragments migrate less: MW must fall as Rf rises. A violation is
+    almost always a size typed on the wrong ladder band in GelAnalyzer, and
+    would make the calibration non-monotonic (two Rf values -> one size)."""
+    bad = [(m1, m2) for m1, m2 in zip(mw_sorted, mw_sorted[1:]) if m2 >= m1]
+    if bad:
+        raise RuntimeError(
+            "ladder sizes do not decrease down the gel: " +
+            ", ".join(f"{a:g} bp above {b:g} bp" for a, b in bad) +
+            "; check the sizes assigned to the ladder bands in GelAnalyzer")
+
+
 def calibration_interp(rf, mw):
     """Piecewise-linear interpolation of log10(MW) against Rf. Outside the
     ladder range the end segment is extrapolated (bands are flagged)."""
@@ -289,6 +301,7 @@ def calibration_interp(rf, mw):
     ls = [math.log10(p[1]) for p in pairs]
     if any(b <= a for a, b in zip(xs, xs[1:])):
         raise RuntimeError("ladder bands with repeated or out-of-order Rf")
+    _check_ladder_monotonic(xs, [p[1] for p in pairs])
 
     def f(r):
         if r <= xs[0]:
@@ -305,6 +318,8 @@ def calibration_interp(rf, mw):
 def calibration_exp(rf, mw):
     """Global model MW = a*exp(-b*Rf) + c (a, c by least squares for each b;
     b by grid search followed by golden-section refinement)."""
+    order = sorted(range(len(rf)), key=lambda i: rf[i])
+    _check_ladder_monotonic([rf[i] for i in order], [mw[i] for i in order])
     def fit_ac(b):
         e = [math.exp(-b * r) for r in rf]
         n, see, se, sy = len(rf), sum(v * v for v in e), sum(e), sum(mw)
@@ -622,6 +637,8 @@ def extract_bands(gap_path, curve_mode="auto", ladder_lane=None, mw_model="inter
         ladders = {i for i, L in enumerate(lanes, 1)
                    if any(b["ladder_mw"] is not None for b in L["bands"])}
     else:
+        if not 1 <= ladder_lane <= len(lanes):
+            raise RuntimeError(f"--ladder-lane {ladder_lane}: the gel has lanes 1-{len(lanes)}")
         ladders = {ladder_lane}
 
     for L in lanes:
@@ -630,7 +647,11 @@ def extract_bands(gap_path, curve_mode="auto", ladder_lane=None, mw_model="inter
 
     auto_info, tilt = None, dict(px=None, corrected=False)
     if curve_mode == "auto":
-        image_width = struct.unpack_from(">I", g["header"]["image"], 16)[0]  # PNG IHDR
+        image = g["header"]["image"]
+        if image[:8] == b"\x89PNG\r\n\x1a\n":
+            image_width = struct.unpack_from(">I", image, 16)[0]      # PNG IHDR
+        else:
+            image_width = max(max(L["x"], L["x_bottom"]) + L["width"] for L in lanes)
         curves, auto_info, tilt = automatic_curves(
             lanes, ladders, curves, image_width, auto_tol_px, auto_min_frac,
             tilt_threshold_px)
@@ -648,7 +669,9 @@ def extract_bands(gap_path, curve_mode="auto", ladder_lane=None, mw_model="inter
 
     # ladder: mean Rf of each size across ladder lanes
     by_mw = {}
-    for L in lanes:
+    for li, L in enumerate(lanes, start=1):
+        if li not in ladders:          # sizes typed on a sample lane do not calibrate
+            continue
         for b in L["bands"]:
             if b["ladder_mw"]:
                 by_mw.setdefault(b["ladder_mw"], []).append(b["rf"])
@@ -746,14 +769,15 @@ def extract_bands(gap_path, curve_mode="auto", ladder_lane=None, mw_model="inter
     return rows, meta, img, lanes, (curves if use_curves else [])
 
 
-def weak_lanes(rows, factor=5.0):
-    """Sample lanes whose total band volume is below median / factor."""
-    tot = {}
+def weak_lanes(rows, sample_lanes, factor=5.0):
+    """Sample lanes whose total band volume is below median / factor.
+    Lanes with no band at all count as volume 0 (the clearest PCR failure)."""
+    if not any(r["raw_volume"] is not None for r in rows):
+        return []
+    tot = {li: 0.0 for li in sample_lanes}
     for r in rows:
         if not r["ladder"] and r["raw_volume"] is not None:
-            tot[r["lane"]] = tot.get(r["lane"], 0) + r["raw_volume"]
-    if not tot:
-        return []
+            tot[r["lane"]] += r["raw_volume"]
     med = statistics.median(tot.values())
     return sorted(l for l, s in tot.items() if s < med / factor)
 
@@ -865,10 +889,11 @@ def validate(rows, gelanalyzer_csv):
     for r in ref:
         k = {c.strip().lower(): v for c, v in r.items() if c}
 
-        def col(*keys):
-            for c, v in k.items():
-                if any(key in c for key in keys):
-                    return v
+        def col(*keys):                      # first key wins, then first column
+            for key in keys:
+                for c, v in k.items():
+                    if key in c:
+                        return v
             return None
         lane = _num(col("lane"))
         band = _num(col("band #", "band no", "band"))
@@ -934,7 +959,12 @@ def run(gap, curve_mode="auto", out_dir=None, ladder_lane=None, mw_model="interp
     print(f"  MW model: {meta['mw_model']}")
     print(f"  ladder range: {meta['ladder_range_bp'][0]:g}-{meta['ladder_range_bp'][1]:g} bp"
           f" | bands outside it: {meta['n_extrapolated_bands']}")
-    weak = weak_lanes(rows)
+    sample_lanes = [li for li in range(1, meta["n_lanes"] + 1)
+                    if li not in meta["ladder_lanes"]]
+    empty = sorted(set(sample_lanes) - {r["lane"] for r in samples})
+    if empty:
+        print(f"  NOTE: sample lanes with no band marked: {empty} (they will not be in the matrix)")
+    weak = weak_lanes(rows, sample_lanes)
     if weak:
         print(f"  WARNING: lanes with very weak signal (volume < 1/5 of the median): {weak}")
         print("    Missing bands in these lanes may be PCR failures. To exclude them,")
